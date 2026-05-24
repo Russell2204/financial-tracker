@@ -1,39 +1,41 @@
-// Локальный сервер для финансового трекера.
-// Хранит данные в SQLite-файле data.sqlite рядом с этим файлом.
-// Запуск: node server.js  →  http://localhost:3000
+// Локальный/облачный сервер для финансового трекера.
+// Хранилище: libSQL (SQLite-совместимое).
+//   • Локально — файл data.sqlite рядом с server.js (если TURSO_DATABASE_URL не задан).
+//   • В облаке — Turso (https://turso.tech), через переменные окружения:
+//       TURSO_DATABASE_URL=libsql://<db>.turso.io
+//       TURSO_AUTH_TOKEN=<токен>
+// Запуск:   node server.js   →   http://localhost:<PORT|3030>
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const initSqlJs = require('sql.js');
+const { createClient } = require('@libsql/client');
 
 const PORT = Number(process.env.PORT) || 3030;
 const ROOT = __dirname;
-const DB_PATH = path.join(ROOT, 'data.sqlite');
 const INDEX_PATH = path.join(ROOT, 'index.html');
+const LOCAL_DB_URL = 'file:' + path.join(ROOT, 'data.sqlite').replace(/\\/g, '/');
 
-let db;
+const db = createClient({
+  url: process.env.TURSO_DATABASE_URL || LOCAL_DB_URL,
+  authToken: process.env.TURSO_AUTH_TOKEN, // игнорируется для file:
+});
 
 const newId = () => crypto.randomUUID();
 const currentMonth = () => new Date().toISOString().slice(0, 7);
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
 async function init() {
-  const SQL = await initSqlJs();
-  if (fs.existsSync(DB_PATH)) {
-    db = new SQL.Database(fs.readFileSync(DB_PATH));
-  } else {
-    db = new SQL.Database();
-  }
-
-  db.exec(`
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS income_sources (
       id          TEXT PRIMARY KEY,
       name        TEXT NOT NULL,
       amount      REAL NOT NULL DEFAULT 0,
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-    );
+    )
+  `);
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS expenses (
       id            TEXT PRIMARY KEY,
       amount        REAL NOT NULL,
@@ -43,21 +45,14 @@ async function init() {
       is_recurring  INTEGER NOT NULL DEFAULT 0,
       billing_day   INTEGER,
       created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-    );
+    )
   `);
-
-  seedIfEmpty();
-  persist();
+  await seedIfEmpty();
 }
 
-function persist() {
-  fs.writeFileSync(DB_PATH, Buffer.from(db.export()));
-}
-
-function seedIfEmpty() {
-  const r = db.exec('SELECT COUNT(*) FROM income_sources');
-  const count = r[0].values[0][0];
-  if (count > 0) return;
+async function seedIfEmpty() {
+  const r = await db.execute('SELECT COUNT(*) AS cnt FROM income_sources');
+  if (Number(r.rows[0].cnt) > 0) return;
 
   const incomeSeed = [
     ['Основная работа', 15000000],
@@ -65,7 +60,10 @@ function seedIfEmpty() {
     ['Дивиденды',         800000],
   ];
   for (const [name, amount] of incomeSeed) {
-    db.run('INSERT INTO income_sources (id, name, amount) VALUES (?, ?, ?)', [newId(), name, amount]);
+    await db.execute({
+      sql: 'INSERT INTO income_sources (id, name, amount) VALUES (?, ?, ?)',
+      args: [newId(), name, amount],
+    });
   }
 
   const m = currentMonth();
@@ -75,37 +73,35 @@ function seedIfEmpty() {
     [ 199000, 'subscriptions', `${m}-15`, 'Стриминг',            1, 15  ],
     [1850000, 'groceries',     `${m}-12`, 'Продукты на неделю',  0, null],
   ];
-  for (const [amount, category, date, description, isRecurring, billingDay] of expSeed) {
-    db.run(
-      'INSERT INTO expenses (id, amount, category, date, description, is_recurring, billing_day) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [newId(), amount, category, date, description, isRecurring, billingDay]
-    );
+  for (const row of expSeed) {
+    await db.execute({
+      sql: 'INSERT INTO expenses (id, amount, category, date, description, is_recurring, billing_day) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      args: [newId(), ...row],
+    });
   }
 }
 
-function listIncome() {
-  const r = db.exec('SELECT id, name, amount FROM income_sources ORDER BY created_at ASC');
-  if (r.length === 0) return [];
-  return r[0].values.map(([id, name, amount]) => ({ id, name, amount }));
+async function listIncome() {
+  const r = await db.execute('SELECT id, name, amount FROM income_sources ORDER BY created_at ASC');
+  return r.rows.map((row) => ({ id: row.id, name: row.name, amount: Number(row.amount) }));
 }
 
-function listExpenses() {
-  const r = db.exec(
+async function listExpenses() {
+  const r = await db.execute(
     'SELECT id, amount, category, date, description, is_recurring, billing_day FROM expenses ORDER BY date DESC, created_at DESC'
   );
-  if (r.length === 0) return [];
-  return r[0].values.map(([id, amount, category, date, description, is_recurring, billing_day]) => ({
-    id,
-    amount,
-    category,
-    date,
-    description,
-    isRecurring: !!is_recurring,
-    billingDay: billing_day == null ? undefined : billing_day,
+  return r.rows.map((row) => ({
+    id: row.id,
+    amount: Number(row.amount),
+    category: row.category,
+    date: row.date,
+    description: row.description,
+    isRecurring: !!Number(row.is_recurring),
+    billingDay: row.billing_day == null ? undefined : Number(row.billing_day),
   }));
 }
 
-const getState = () => ({ income: listIncome(), expenses: listExpenses() });
+const getState = async () => ({ income: await listIncome(), expenses: await listExpenses() });
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -139,20 +135,24 @@ async function handle(req, res) {
     return send(res, 200, fs.readFileSync(INDEX_PATH), 'text/html; charset=utf-8');
   }
 
+  // ---- health check (for Render) ----
+  if (method === 'GET' && pathname === '/healthz') {
+    return send(res, 200, { ok: true });
+  }
+
   // ---- api: full state ----
   if (pathname === '/api/state' && method === 'GET') {
-    return send(res, 200, getState());
+    return send(res, 200, await getState());
   }
 
   // ---- api: income ----
   if (pathname === '/api/income' && method === 'POST') {
     const body = await readBody(req);
-    db.run(
-      'INSERT INTO income_sources (id, name, amount) VALUES (?, ?, ?)',
-      [newId(), body.name || 'Новый источник', Number(body.amount) || 0]
-    );
-    persist();
-    return send(res, 200, getState());
+    await db.execute({
+      sql: 'INSERT INTO income_sources (id, name, amount) VALUES (?, ?, ?)',
+      args: [newId(), body.name || 'Новый источник', Number(body.amount) || 0],
+    });
+    return send(res, 200, await getState());
   }
 
   const incMatch = pathname.match(/^\/api\/income\/([^/]+)$/);
@@ -160,24 +160,32 @@ async function handle(req, res) {
     const id = incMatch[1];
     if (method === 'PATCH') {
       const body = await readBody(req);
-      if ('name' in body)   db.run('UPDATE income_sources SET name = ? WHERE id = ?',   [String(body.name ?? ''), id]);
-      if ('amount' in body) db.run('UPDATE income_sources SET amount = ? WHERE id = ?', [Number(body.amount) || 0, id]);
-      persist();
-      return send(res, 200, getState());
+      if ('name' in body) {
+        await db.execute({
+          sql: 'UPDATE income_sources SET name = ? WHERE id = ?',
+          args: [String(body.name ?? ''), id],
+        });
+      }
+      if ('amount' in body) {
+        await db.execute({
+          sql: 'UPDATE income_sources SET amount = ? WHERE id = ?',
+          args: [Number(body.amount) || 0, id],
+        });
+      }
+      return send(res, 200, await getState());
     }
     if (method === 'DELETE') {
-      db.run('DELETE FROM income_sources WHERE id = ?', [id]);
-      persist();
-      return send(res, 200, getState());
+      await db.execute({ sql: 'DELETE FROM income_sources WHERE id = ?', args: [id] });
+      return send(res, 200, await getState());
     }
   }
 
   // ---- api: expenses ----
   if (pathname === '/api/expenses' && method === 'POST') {
     const body = await readBody(req);
-    db.run(
-      'INSERT INTO expenses (id, amount, category, date, description, is_recurring, billing_day) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [
+    await db.execute({
+      sql: 'INSERT INTO expenses (id, amount, category, date, description, is_recurring, billing_day) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      args: [
         newId(),
         Number(body.amount) || 0,
         String(body.category || 'other'),
@@ -185,17 +193,15 @@ async function handle(req, res) {
         String(body.description || ''),
         body.isRecurring ? 1 : 0,
         body.isRecurring ? (Number(body.billingDay) || 1) : null,
-      ]
-    );
-    persist();
-    return send(res, 200, getState());
+      ],
+    });
+    return send(res, 200, await getState());
   }
 
   const expMatch = pathname.match(/^\/api\/expenses\/([^/]+)$/);
   if (expMatch && method === 'DELETE') {
-    db.run('DELETE FROM expenses WHERE id = ?', [expMatch[1]]);
-    persist();
-    return send(res, 200, getState());
+    await db.execute({ sql: 'DELETE FROM expenses WHERE id = ?', args: [expMatch[1]] });
+    return send(res, 200, await getState());
   }
 
   send(res, 404, { error: 'Not found' });
@@ -210,8 +216,9 @@ init()
       });
     });
     server.listen(PORT, () => {
+      const mode = process.env.TURSO_DATABASE_URL ? 'Turso (cloud)' : 'локальный файл data.sqlite';
       console.log(`✓ Финансовый трекер запущен:  http://localhost:${PORT}`);
-      console.log(`✓ База данных:                ${DB_PATH}`);
+      console.log(`✓ Хранилище:                  ${mode}`);
     });
   })
   .catch((err) => {

@@ -2,11 +2,14 @@
   "name": "finance-tracker",
   "version": "1.0.0",
   "private": true,
-  "description": "Личный финансовый трекер — данные хранятся в SQLite-файле рядом с index.html.",
+  "description": "Личный финансовый трекер — backend на Node + libSQL (Turso), фронт — React/Tailwind в одном HTML.",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "sql.js": "^1.10.3"
+    "@libsql/client": "^0.14.0"
   }
 }
