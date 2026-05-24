@@ -1,0 +1,12 @@
+{
+  "name": "finance-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Личный финансовый трекер — данные хранятся в SQLite-файле рядом с index.html.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "sql.js": "^1.10.3"
+  }
+}

@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Личный финансовый трекер</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: 'class' };
+  </script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html, body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    html.dark { color-scheme: dark; }
+    html:not(.dark) { color-scheme: light; }
+  </style>
+  <script>
+    // Применяем сохранённую тему до загрузки React, чтобы не было вспышки светлой темы.
+    (function () {
+      try {
+        var saved = localStorage.getItem('finance_tracker_theme');
+        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (saved === 'dark' || (saved !== 'light' && prefersDark)) {
+          document.documentElement.classList.add('dark');
+        }
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased dark:bg-slate-900 dark:text-slate-100 transition-colors">
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useMemo, useCallback } = React;
+
+    // ------------------------- Constants -------------------------
+
+    const THEME_KEY = 'finance_tracker_theme';
+
+    const CATEGORIES = {
+      rent:          { label: 'Аренда',        color: '#ef4444' },
+      utilities:     { label: 'Коммунальные',  color: '#f59e0b' },
+      subscriptions: { label: 'Подписки',      color: '#8b5cf6' },
+      groceries:     { label: 'Продукты',      color: '#10b981' },
+      other:         { label: 'Прочее',        color: '#64748b' },
+    };
+
+    const MONTH_NAMES = [
+      'Январь','Февраль','Март','Апрель','Май','Июнь',
+      'Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь',
+    ];
+
+    // ------------------------- API client -------------------------
+
+    async function call(path, opts = {}) {
+      const res = await fetch(path, {
+        headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
+        ...opts,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+      }
+      return res.json();
+    }
+
+    const api = {
+      state:         ()              => call('/api/state'),
+      addIncome:     ()              => call('/api/income', { method: 'POST', body: '{}' }),
+      patchIncome:   (id, patch)     => call(`/api/income/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+      deleteIncome:  (id)            => call(`/api/income/${id}`, { method: 'DELETE' }),
+      addExpense:    (data)          => call('/api/expenses', { method: 'POST', body: JSON.stringify(data) }),
+      deleteExpense: (id)            => call(`/api/expenses/${id}`, { method: 'DELETE' }),
+    };
+
+    // ------------------------- Inline Lucide-style Icons -------------------------
+
+    const Icon = ({ children, className = 'w-5 h-5' }) => (
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+           className={className}>
+        {children}
+      </svg>
+    );
+    const HomeIcon          = (p) => <Icon {...p}><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></Icon>;
+    const ZapIcon           = (p) => <Icon {...p}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></Icon>;
+    const RepeatIcon        = (p) => <Icon {...p}><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></Icon>;
+    const ShoppingCartIcon  = (p) => <Icon {...p}><circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/></Icon>;
+    const MoreIcon          = (p) => <Icon {...p}><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></Icon>;
+    const PlusIcon          = (p) => <Icon {...p}><path d="M5 12h14"/><path d="M12 5v14"/></Icon>;
+    const TrashIcon         = (p) => <Icon {...p}><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></Icon>;
+    const WalletIcon        = (p) => <Icon {...p}><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></Icon>;
+    const TrendingDownIcon  = (p) => <Icon {...p}><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></Icon>;
+    const ScaleIcon         = (p) => <Icon {...p}><path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10"/><path d="M12 3v18"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/></Icon>;
+    const SunIcon           = (p) => <Icon {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></Icon>;
+    const MoonIcon          = (p) => <Icon {...p}><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></Icon>;
+    const DatabaseIcon      = (p) => <Icon {...p}><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></Icon>;
+
+    const CATEGORY_ICONS = {
+      rent: HomeIcon,
+      utilities: ZapIcon,
+      subscriptions: RepeatIcon,
+      groceries: ShoppingCartIcon,
+      other: MoreIcon,
+    };
+
+    // ------------------------- Utilities -------------------------
+
+    const formatMoney = (n) =>
+      new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(n || 0) + ' сум';
+
+    const todayISO     = () => new Date().toISOString().slice(0, 10);
+    const monthOf      = (iso) => iso.slice(0, 7);
+    const currentMonth = () => todayISO().slice(0, 7);
+
+    const formatMonth = (yyyymm) => {
+      const [y, m] = yyyymm.split('-');
+      return `${MONTH_NAMES[parseInt(m, 10) - 1]} ${y}`;
+    };
+
+    const initialTheme = () => {
+      try {
+        const t = localStorage.getItem(THEME_KEY);
+        if (t === 'dark' || t === 'light') return t;
+      } catch (e) {}
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    };
+
+    // ------------------------- Components -------------------------
+
+    function ThemeToggle({ theme, setTheme }) {
+      const isDark = theme === 'dark';
+      return (
+        <button
+          onClick={() => setTheme(isDark ? 'light' : 'dark')}
+          className="inline-flex items-center justify-center w-9 h-9 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-amber-300 dark:hover:bg-slate-700 transition-colors"
+          aria-label={isDark ? 'Светлая тема' : 'Тёмная тема'}
+          title={isDark ? 'Светлая тема' : 'Тёмная тема'}
+        >
+          {isDark ? <SunIcon className="w-4 h-4" /> : <MoonIcon className="w-4 h-4" />}
+        </button>
+      );
+    }
+
+    function Header({ period, setPeriod, allMonths, theme, setTheme }) {
+      return (
+        <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-700 flex items-center justify-center text-white shadow-md">
+              <WalletIcon className="w-6 h-6" />
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Личный финансовый трекер</h1>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-slate-600 dark:text-slate-400">Период:</label>
+            <select
+              value={period}
+              onChange={(e) => setPeriod(e.target.value)}
+              className="rounded-lg border border-slate-300 bg-white text-slate-900 px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100"
+            >
+              {allMonths.map((m) => (
+                <option key={m} value={m}>{formatMonth(m)}</option>
+              ))}
+            </select>
+            <ThemeToggle theme={theme} setTheme={setTheme} />
+          </div>
+        </header>
+      );
+    }
+
+    function StatCard({ title, value, icon, accent }) {
+      const accents = {
+        green: {
+          text: 'text-emerald-700 dark:text-emerald-300',
+          bg:   'bg-emerald-50 dark:bg-emerald-900/40',
+          ring: 'text-emerald-600 dark:text-emerald-300',
+        },
+        red: {
+          text: 'text-rose-700 dark:text-rose-300',
+          bg:   'bg-rose-50 dark:bg-rose-900/40',
+          ring: 'text-rose-600 dark:text-rose-300',
+        },
+      };
+      const a = accents[accent];
+      return (
+        <div className="rounded-2xl bg-white shadow-sm border border-slate-200 p-5 flex items-center justify-between dark:bg-slate-800 dark:border-slate-700">
+          <div className="min-w-0">
+            <p className="text-sm text-slate-500 dark:text-slate-400 mb-1">{title}</p>
+            <p className={`text-2xl font-bold truncate ${a.text}`}>{value}</p>
+          </div>
+          <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${a.bg} ${a.ring}`}>
+            {icon}
+          </div>
+        </div>
+      );
+    }
+
+    function SummaryCards({ income, expenses, balance }) {
+      const positive = balance >= 0;
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+          <StatCard title="Доходы"  value={formatMoney(income)}   icon={<WalletIcon />}        accent="green" />
+          <StatCard title="Расходы" value={formatMoney(expenses)} icon={<TrendingDownIcon />}  accent="red"   />
+          <StatCard title="Остаток" value={formatMoney(balance)}  icon={<ScaleIcon />}         accent={positive ? 'green' : 'red'} />
+        </div>
+      );
+    }
+
+    // Local-state row so typing is instant; PATCH only fires on blur if something changed.
+    function IncomeRow({ source, onPatch, onDelete }) {
+      const [name, setName] = useState(source.name);
+      const [amount, setAmount] = useState(source.amount);
+
+      useEffect(() => { setName(source.name); },     [source.name]);
+      useEffect(() => { setAmount(source.amount); }, [source.amount]);
+
+      const commit = () => {
+        const patch = {};
+        if (name !== source.name) patch.name = name;
+        const newAmount = Number(amount) || 0;
+        if (newAmount !== Number(source.amount)) patch.amount = newAmount;
+        if (Object.keys(patch).length > 0) onPatch(source.id, patch);
+      };
+
+      const inputCls =
+        'rounded-lg border border-slate-300 bg-white text-slate-900 px-3 py-2 text-sm ' +
+        'focus:outline-none focus:ring-2 focus:ring-emerald-500 ' +
+        'dark:bg-slate-700 dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500';
+
+      return (
+        <li className="flex items-center gap-2">
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onBlur={commit}
+            className={`flex-1 min-w-0 ${inputCls}`}
+            placeholder="Название"
+          />
+          <input
+            type="number"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            onBlur={commit}
+            className={`w-28 sm:w-36 text-right ${inputCls}`}
+            placeholder="0"
+            min="0"
+          />
+          <button
+            onClick={() => onDelete(source.id)}
+            className="p-2 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 transition-colors shrink-0"
+            aria-label="Удалить"
+          >
+            <TrashIcon className="w-4 h-4" />
+          </button>
+        </li>
+      );
+    }
+
+    function IncomeManager({ sources, onPatch, onAdd, onDelete }) {
+      return (
+        <div className="rounded-2xl bg-white shadow-sm border border-slate-200 p-5 dark:bg-slate-800 dark:border-slate-700">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold">Источники доходов</h2>
+            <button
+              onClick={onAdd}
+              className="inline-flex items-center gap-1 text-sm font-medium px-3 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
+            >
+              <PlusIcon className="w-4 h-4" /> Добавить
+            </button>
+          </div>
+          <ul className="space-y-2">
+            {sources.length === 0 && (
+              <li className="text-sm text-slate-500 dark:text-slate-400 text-center py-4">Пока нет источников дохода</li>
+            )}
+            {sources.map((s) => (
+              <IncomeRow key={s.id} source={s} onPatch={onPatch} onDelete={onDelete} />
+            ))}
+          </ul>
+        </div>
+      );
+    }
+
+    function DonutChart({ data, size = 220, strokeWidth = 34 }) {
+      const total = data.reduce((s, d) => s + d.total, 0);
+      if (total === 0) return null;
+      const radius = (size - strokeWidth) / 2;
+      const cx = size / 2;
+      const cy = size / 2;
+      const circumference = 2 * Math.PI * radius;
+      let cumulative = 0;
+      return (
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="block">
+          <g transform={`rotate(-90 ${cx} ${cy})`}>
+            <circle cx={cx} cy={cy} r={radius} fill="none" strokeWidth={strokeWidth}
+                    className="stroke-slate-100 dark:stroke-slate-700" />
+            {data.map((d) => {
+              const fraction = d.total / total;
+              const dash = Math.max(0, fraction * circumference - 2);
+              const gap = circumference - dash;
+              const offset = -cumulative * circumference;
+              cumulative += fraction;
+              return (
+                <circle
+                  key={d.category}
+                  cx={cx} cy={cy} r={radius}
+                  fill="none"
+                  stroke={d.color}
+                  strokeWidth={strokeWidth}
+                  strokeDasharray={`${dash} ${gap}`}
+                  strokeDashoffset={offset}
+                  strokeLinecap="butt"
+                />
+              );
+            })}
+          </g>
+          <text x="50%" y="50%" textAnchor="middle" dy="-0.4em"
+                className="fill-slate-500 dark:fill-slate-400" style={{ fontSize: 12 }}>
+            Всего
+          </text>
+          <text x="50%" y="50%" textAnchor="middle" dy="1em"
+                className="fill-slate-900 dark:fill-slate-100" style={{ fontSize: 16, fontWeight: 700 }}>
+            {formatMoney(total)}
+          </text>
+        </svg>
+      );
+    }
+
+    function Analytics({ breakdown, totalIncome, totalExpenses }) {
+      const data = breakdown.filter((b) => b.total > 0).sort((a, b) => b.total - a.total);
+      const totalShown = data.reduce((s, d) => s + d.total, 0);
+      const spentPct = totalIncome > 0 ? Math.min(100, (totalExpenses / totalIncome) * 100) : 0;
+      const barColor =
+        spentPct >= 100 ? 'bg-rose-600' :
+        spentPct >= 80  ? 'bg-amber-500' :
+                          'bg-emerald-600';
+
+      return (
+        <div className="rounded-2xl bg-white shadow-sm border border-slate-200 p-5 dark:bg-slate-800 dark:border-slate-700">
+          <h2 className="text-lg font-semibold mb-4">Аналитика расходов</h2>
+          {data.length === 0 ? (
+            <p className="text-sm text-slate-500 dark:text-slate-400 text-center py-12">Нет данных для отображения</p>
+          ) : (
+            <div className="flex flex-col sm:flex-row items-center sm:items-start gap-5">
+              <div className="shrink-0">
+                <DonutChart data={data} />
+              </div>
+              <ul className="flex-1 w-full space-y-1.5">
+                {data.map((d) => {
+                  const pct = totalShown > 0 ? (d.total / totalShown) * 100 : 0;
+                  return (
+                    <li key={d.category} className="flex items-center gap-2 text-sm">
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: d.color }} />
+                      <span className="flex-1 truncate text-slate-700 dark:text-slate-300">{d.label}</span>
+                      <span className="font-medium text-slate-900 dark:text-slate-100 whitespace-nowrap">{formatMoney(d.total)}</span>
+                      <span className="text-xs text-slate-500 dark:text-slate-400 w-10 text-right">{pct.toFixed(0)}%</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+          <div className="mt-5">
+            <div className="flex items-center justify-between text-sm mb-2">
+              <span className="text-slate-600 dark:text-slate-400">Потрачено от дохода</span>
+              <span className="font-semibold">{spentPct.toFixed(1)}%</span>
+            </div>
+            <div className="w-full h-2 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+              <div className={`h-full transition-all ${barColor}`} style={{ width: `${spentPct}%` }} />
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function ExpenseManager({ expenses, onAdd, onDelete, period }) {
+      const [form, setForm] = useState({
+        amount: '',
+        category: 'groceries',
+        date: todayISO(),
+        description: '',
+        isRecurring: false,
+        billingDay: 1,
+      });
+
+      const submit = (e) => {
+        e.preventDefault();
+        const amt = parseFloat(form.amount);
+        if (!amt || amt <= 0) return;
+        onAdd({
+          amount: amt,
+          category: form.category,
+          date: form.date,
+          description: form.description.trim(),
+          isRecurring: form.isRecurring,
+          billingDay: form.isRecurring ? parseInt(form.billingDay, 10) || 1 : null,
+        });
+        setForm({ ...form, amount: '', description: '' });
+      };
+
+      const inputCls =
+        'w-full rounded-lg border border-slate-300 bg-white text-slate-900 px-3 py-2 text-sm ' +
+        'focus:outline-none focus:ring-2 focus:ring-emerald-500 ' +
+        'dark:bg-slate-700 dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500';
+      const lblCls = 'block text-xs text-slate-600 dark:text-slate-400 mb-1';
+
+      return (
+        <div className="rounded-2xl bg-white shadow-sm border border-slate-200 p-5 dark:bg-slate-800 dark:border-slate-700">
+          <h2 className="text-lg font-semibold mb-4">Добавить расход</h2>
+          <form onSubmit={submit} className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
+            <div>
+              <label className={lblCls}>Сумма</label>
+              <input type="number" value={form.amount}
+                onChange={(e) => setForm({ ...form, amount: e.target.value })}
+                className={inputCls} placeholder="0" min="0" step="0.01" required />
+            </div>
+            <div>
+              <label className={lblCls}>Категория</label>
+              <select value={form.category}
+                onChange={(e) => setForm({ ...form, category: e.target.value })}
+                className={inputCls}>
+                {Object.entries(CATEGORIES).map(([k, v]) => (
+                  <option key={k} value={k}>{v.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className={lblCls}>Дата</label>
+              <input type="date" value={form.date}
+                onChange={(e) => setForm({ ...form, date: e.target.value })}
+                className={inputCls} required />
+            </div>
+            <div>
+              <label className={lblCls}>Описание</label>
+              <input type="text" value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+                className={inputCls} placeholder="—" />
+            </div>
+            <div className="sm:col-span-2 flex items-center gap-4 flex-wrap">
+              <label className="inline-flex items-center gap-2 text-sm cursor-pointer select-none">
+                <input type="checkbox" checked={form.isRecurring}
+                  onChange={(e) => setForm({ ...form, isRecurring: e.target.checked })}
+                  className="rounded text-emerald-600 focus:ring-emerald-500" />
+                <span>Повторяющийся платеж</span>
+              </label>
+              {form.isRecurring && (
+                <div className="flex items-center gap-2">
+                  <label className="text-sm text-slate-600 dark:text-slate-400">День списания:</label>
+                  <select value={form.billingDay}
+                    onChange={(e) => setForm({ ...form, billingDay: e.target.value })}
+                    className="rounded-lg border border-slate-300 bg-white text-slate-900 px-2 py-1 text-sm dark:bg-slate-700 dark:border-slate-600 dark:text-slate-100">
+                    {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+            <div className="sm:col-span-2">
+              <button type="submit"
+                className="inline-flex items-center gap-1 px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 transition-colors">
+                <PlusIcon className="w-4 h-4" /> Добавить расход
+              </button>
+            </div>
+          </form>
+
+          <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-2 uppercase tracking-wider">
+            История за {formatMonth(period)}
+          </h3>
+          <ul className="space-y-2 max-h-[480px] overflow-y-auto pr-1">
+            {expenses.length === 0 && (
+              <li className="text-sm text-slate-500 dark:text-slate-400 text-center py-6">Расходов за этот период пока нет</li>
+            )}
+            {expenses.map((e) => {
+              const cat = CATEGORIES[e.category] || CATEGORIES.other;
+              const IconComp = CATEGORY_ICONS[e.category] || MoreIcon;
+              return (
+                <li key={e.id + (e._synth ? `-${e.date}` : '')}
+                  className="flex items-center gap-3 p-3 rounded-lg bg-slate-50 border border-slate-100 dark:bg-slate-700/50 dark:border-slate-700">
+                  <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0"
+                    style={{ backgroundColor: cat.color + '20', color: cat.color }}>
+                    <IconComp className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium flex items-center gap-2 flex-wrap">
+                      <span>{cat.label}</span>
+                      {e.isRecurring && (
+                        <span className="text-[10px] uppercase tracking-wider bg-violet-100 text-violet-700 dark:bg-violet-900/50 dark:text-violet-300 px-1.5 py-0.5 rounded">
+                          регулярный
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                      {(e.description || '—') + ' · ' + e.date}
+                    </p>
+                  </div>
+                  <span className="text-sm font-semibold text-rose-600 dark:text-rose-400 whitespace-nowrap">−{formatMoney(e.amount)}</span>
+                  {!e._synth && (
+                    <button onClick={() => onDelete(e.id)}
+                      className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 transition-colors shrink-0"
+                      aria-label="Удалить">
+                      <TrashIcon className="w-4 h-4" />
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      );
+    }
+
+    function LoadingScreen() {
+      return (
+        <div className="min-h-screen flex items-center justify-center text-slate-500 dark:text-slate-400">
+          <div className="text-center">
+            <div className="inline-block w-8 h-8 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin mb-3" />
+            <p className="text-sm">Подключение к базе данных…</p>
+          </div>
+        </div>
+      );
+    }
+
+    function FatalError({ message, onRetry }) {
+      return (
+        <div className="min-h-screen flex items-center justify-center p-6">
+          <div className="max-w-md text-center">
+            <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-rose-100 dark:bg-rose-900/40 text-rose-600 dark:text-rose-300 flex items-center justify-center">
+              <DatabaseIcon className="w-7 h-7" />
+            </div>
+            <h2 className="text-lg font-semibold mb-2">Сервер недоступен</h2>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mb-1">{message}</p>
+            <p className="text-xs text-slate-500 dark:text-slate-500 mb-4">
+              Запустите сервер командой <code className="bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">node server.js</code> в папке проекта.
+            </p>
+            <button onClick={onRetry}
+              className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700">
+              Попробовать снова
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // ------------------------- App -------------------------
+
+    function App() {
+      const [income,   setIncome]   = useState([]);
+      const [expenses, setExpenses] = useState([]);
+      const [period,   setPeriod]   = useState(currentMonth());
+      const [theme,    setTheme]    = useState(initialTheme);
+      const [loading,  setLoading]  = useState(true);
+      const [fatal,    setFatal]    = useState(null);
+      const [toast,    setToast]    = useState(null);
+
+      const applyState = (s) => {
+        setIncome(s.income || []);
+        setExpenses(s.expenses || []);
+      };
+
+      const loadAll = useCallback(async () => {
+        setLoading(true);
+        setFatal(null);
+        try {
+          applyState(await api.state());
+        } catch (e) {
+          setFatal(e.message || 'Не удалось подключиться');
+        } finally {
+          setLoading(false);
+        }
+      }, []);
+
+      useEffect(() => { loadAll(); }, [loadAll]);
+
+      // Theme persistence
+      useEffect(() => {
+        const root = document.documentElement;
+        if (theme === 'dark') root.classList.add('dark');
+        else root.classList.remove('dark');
+        try { localStorage.setItem(THEME_KEY, theme); } catch (e) {}
+      }, [theme]);
+
+      // Auto-dismiss toast
+      useEffect(() => {
+        if (!toast) return;
+        const t = setTimeout(() => setToast(null), 3500);
+        return () => clearTimeout(t);
+      }, [toast]);
+
+      // Wrapper: run an API call, replace state from response, surface errors.
+      const run = async (fn) => {
+        try {
+          applyState(await fn());
+        } catch (e) {
+          setToast(e.message || 'Ошибка сохранения');
+        }
+      };
+
+      const filteredExpenses = useMemo(() => {
+        const result = [];
+        for (const e of expenses) {
+          const origMonth = monthOf(e.date);
+          if (e.isRecurring) {
+            if (period >= origMonth) {
+              if (origMonth === period) {
+                result.push(e);
+              } else {
+                const day = String(e.billingDay || 1).padStart(2, '0');
+                result.push({ ...e, date: `${period}-${day}`, _synth: true });
+              }
+            }
+          } else if (origMonth === period) {
+            result.push(e);
+          }
+        }
+        return result.sort((a, b) => b.date.localeCompare(a.date));
+      }, [expenses, period]);
+
+      const totalIncome   = useMemo(() => income.reduce((s, x) => s + (Number(x.amount) || 0), 0), [income]);
+      const totalExpenses = useMemo(() => filteredExpenses.reduce((s, x) => s + (Number(x.amount) || 0), 0), [filteredExpenses]);
+      const balance = totalIncome - totalExpenses;
+
+      const breakdown = useMemo(() => {
+        const totals = {};
+        for (const e of filteredExpenses) {
+          totals[e.category] = (totals[e.category] || 0) + e.amount;
+        }
+        const sum = Object.values(totals).reduce((s, x) => s + x, 0);
+        return Object.entries(totals).map(([category, total]) => ({
+          category,
+          total,
+          pct: sum > 0 ? (total / sum) * 100 : 0,
+          label: (CATEGORIES[category] || {}).label || category,
+          color: (CATEGORIES[category] || {}).color || '#64748b',
+        }));
+      }, [filteredExpenses]);
+
+      const allMonths = useMemo(() => {
+        const set = new Set();
+        const now = new Date();
+        for (let i = -6; i <= 1; i++) {
+          const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+          set.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+        }
+        for (const e of expenses) set.add(monthOf(e.date));
+        return Array.from(set).sort().reverse();
+      }, [expenses]);
+
+      if (loading) return <LoadingScreen />;
+      if (fatal)   return <FatalError message={fatal} onRetry={loadAll} />;
+
+      return (
+        <div className="min-h-screen max-w-6xl mx-auto p-4 sm:p-6 lg:p-8">
+          <Header
+            period={period} setPeriod={setPeriod} allMonths={allMonths}
+            theme={theme}   setTheme={setTheme}
+          />
+          <SummaryCards income={totalIncome} expenses={totalExpenses} balance={balance} />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+            <IncomeManager
+              sources={income}
+              onPatch={(id, patch) => run(() => api.patchIncome(id, patch))}
+              onAdd={()            => run(() => api.addIncome())}
+              onDelete={(id)       => run(() => api.deleteIncome(id))}
+            />
+            <Analytics breakdown={breakdown} totalIncome={totalIncome} totalExpenses={totalExpenses} />
+          </div>
+          <ExpenseManager
+            expenses={filteredExpenses}
+            onAdd={(expense) => run(() => api.addExpense(expense))}
+            onDelete={(id)   => run(() => api.deleteExpense(id))}
+            period={period}
+          />
+          <footer className="mt-8 flex items-center justify-center gap-1.5 text-xs text-slate-400 dark:text-slate-500">
+            <DatabaseIcon className="w-3.5 h-3.5" />
+            <span>Данные хранятся в SQLite-файле <code>data.sqlite</code> рядом с index.html</span>
+          </footer>
+
+          {toast && (
+            <div className="fixed bottom-4 right-4 max-w-sm px-4 py-3 rounded-lg shadow-lg bg-rose-600 text-white text-sm">
+              {toast}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
